@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Updated verify script to match improved safe_iter behavior
 """
+import tools.monkeypatch_model_calls
 import subprocess
 import sys
 import os

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import tools.monkeypatch_model_calls
 import sys
 from pathlib import Path
 

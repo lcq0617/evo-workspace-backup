@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """scripts/safe_iter.py
 
-Improved safe_iter:
-- Create a single explicit backup commit (or reuse HEAD if no changes) and record it as .backups/<commit>.json
-- Stream command output
-- On non-zero exit, rollback to the recorded commit using git reset --hard + git clean -fd and a restore fallback
-- Attempts to normalize recovery across Windows by using git restore or git checkout when available
-
-Usage: python scripts/safe_iter.py <command> [args...]
+Safe iterator with output truncation and logging to .backups to reduce chat token usage.
+- Streams command output but only prints a capped number of lines to stdout (default 100).
+- Writes full command output to .backups/<ts>-<pid>.log for inspection.
 """
+import tools.monkeypatch_model_calls
 
 from __future__ import annotations
 import sys
@@ -19,19 +16,48 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from collections import deque
 
 RED = "\033[1;31m"
 RESET = "\033[0m"
 BACKUP_RECORD_DIR = Path('.backups')
+MAX_PRINT_LINES = 100
+MAX_PRINT_BYTES = 20_000  # safety cap for printed text
 
 
 def run_cmd_stream(cmd):
+    BACKUP_RECORD_DIR.mkdir(exist_ok=True)
+    ts = time.strftime('%Y%m%d-%H%M%S')
+    log_path = BACKUP_RECORD_DIR / f'cmd-{ts}-{os.getpid()}.log'
+    printed_lines = 0
+    printed_bytes = 0
+    tail = deque(maxlen=MAX_PRINT_LINES)
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        for line in proc.stdout:
-            print(line, end="")
-        proc.wait()
-        return proc.returncode
+        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as proc, log_path.open('w', encoding='utf-8') as lf:
+            for line in proc.stdout:
+                lf.write(line)
+                # preserve tail buffer
+                tail.append(line)
+                # print while under caps
+                if printed_lines < MAX_PRINT_LINES and printed_bytes < MAX_PRINT_BYTES:
+                    to_print = line
+                    # if printing this line would exceed byte cap, truncate
+                    if printed_bytes + len(to_print) > MAX_PRINT_BYTES:
+                        remain = MAX_PRINT_BYTES - printed_bytes
+                        to_print = to_print[:max(0, remain)] + '...\n'
+                    print(to_print, end='')
+                    printed_lines += 1
+                    printed_bytes += len(to_print)
+            proc.wait()
+            rc = proc.returncode
+        # if output was truncated, print a short note and last lines
+        if printed_lines >= MAX_PRINT_LINES or printed_bytes >= MAX_PRINT_BYTES:
+            print(f"...output truncated (showing up to {MAX_PRINT_LINES} lines / {MAX_PRINT_BYTES} bytes). Full log: {log_path}")
+            # also show last few lines for quick context
+            print('\n--- last lines ---')
+            for l in tail:
+                print(l, end='')
+        return rc
     except FileNotFoundError:
         print(f"{RED}命令未找到: {cmd[0]}{RESET}", file=sys.stderr)
         return 127
@@ -40,8 +66,8 @@ def run_cmd_stream(cmd):
         return 1
 
 
+# The rest of the script remains same but uses run_cmd_stream above
 def run_capture(cmd):
-    """Run command and return (rc, stdout)."""
     try:
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         return res.returncode, res.stdout
@@ -65,28 +91,22 @@ def make_backup_commit(message: str) -> str | None:
     BACKUP_RECORD_DIR.mkdir(exist_ok=True)
     ts = time.strftime('%Y%m%d-%H%M%S')
     prev_head = get_head()
-    # Stage all (respect .gitignore)
     rc_add, out_add = run_capture(['git', 'add', '-A'])
     if rc_add != 0:
         print('git add failed:', out_add, file=sys.stderr)
         return None
-    # Try commit
     commit_msg = f"{message} [{ts}]"
     rc_commit, out_commit = run_capture(['git', 'commit', '-m', commit_msg])
     if rc_commit == 0:
-        # new commit created
         rc, out = run_capture(['git', 'rev-parse', 'HEAD'])
         if rc == 0:
             commit_hash = out.strip()
         else:
             commit_hash = None
     else:
-        # Nothing to commit or commit failed -> reuse prev_head
         if prev_head:
             commit_hash = prev_head
         else:
-            # no HEAD (empty repo). attempt to create an initial commit by committing whatever is present
-            # try to create an initial commit by setting a temporary commit
             rc_init, out_init = run_capture(['git', 'commit', '--allow-empty', '-m', commit_msg])
             if rc_init == 0:
                 rc, out = run_capture(['git', 'rev-parse', 'HEAD'])
@@ -96,7 +116,6 @@ def make_backup_commit(message: str) -> str | None:
                 commit_hash = None
     if not commit_hash:
         return None
-    # Record backup file named by commit hash for unambiguous mapping
     rec = {'ts': ts, 'commit': commit_hash, 'msg': message}
     path = BACKUP_RECORD_DIR / f'{commit_hash}.json'
     try:
@@ -107,16 +126,41 @@ def make_backup_commit(message: str) -> str | None:
     return commit_hash
 
 
+def normalize_line_endings_to_lf():
+    try:
+        rc, out = run_capture(['git', 'ls-files'])
+        if rc != 0:
+            return
+        files = [s for s in out.splitlines() if s]
+        for f in files:
+            p = Path(f)
+            if not p.exists() or not p.is_file():
+                continue
+            try:
+                data = p.read_bytes()
+            except Exception:
+                continue
+            if b'\x00' in data:
+                continue
+            new = data.replace(b'\r\n', b'\n')
+            new = new.replace(b'\r', b'\n')
+            if new != data:
+                try:
+                    p.write_bytes(new)
+                except Exception as e:
+                    print('Failed to normalize', f, e, file=sys.stderr)
+    except Exception:
+        pass
+
+
 def rollback_to(commit_hash: str):
     print(f"{RED}检测到致命异常，触发自动回滚到 {commit_hash}！{RESET}", file=sys.stderr)
-    # Hard reset
     subprocess.call(['git', 'reset', '--hard', commit_hash])
     subprocess.call(['git', 'clean', '-fd'])
-    # Try to restore worktree explicitly (git restore preferred)
     rc, out = run_capture(['git', 'restore', '--source', commit_hash, '--worktree', '--staged', '.'])
     if rc != 0:
-        # fallback to checkout
         subprocess.call(['git', 'checkout', commit_hash, '--', '.'])
+    normalize_line_endings_to_lf()
 
 
 def try_use_just_backup(message: str) -> str | None:
@@ -138,16 +182,12 @@ def main():
     cmd = sys.argv[1:]
     cmd_display = ' '.join(shlex.quote(c) for c in cmd)
     backup_msg = f'Auto-backup before running: {cmd_display}'
-
-    # Prefer just if available and working
     commit_hash = try_use_just_backup(backup_msg)
     if not commit_hash:
         commit_hash = make_backup_commit(backup_msg)
     if not commit_hash:
         print(f"{RED}自动备份失败：无法生成备份 commit. 中止执行。{RESET}", file=sys.stderr)
         sys.exit(1)
-
-    # Run the command
     rc = run_cmd_stream(cmd)
     if rc != 0:
         rollback_to(commit_hash)
