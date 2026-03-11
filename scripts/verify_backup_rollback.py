@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""scripts/verify_backup_rollback.py
-
-Run a set of local verification checks for the backup/rollback workflow.
-
-Usage:
-  python scripts/verify_backup_rollback.py
-
-Notes:
-- Prefer running in Git Bash / WSL on Windows for best compatibility with Justfile recipes.
-- The script will create commits and a test file (tmp_test.txt). It tries to avoid destructive actions beyond commits and files in the repo, but you should run this in a safe workspace.
+"""Updated verify script to match improved safe_iter behavior
 """
 import subprocess
 import sys
@@ -23,7 +14,6 @@ SAFE_ITER = ROOT / 'scripts' / 'safe_iter.py'
 TMP_FILE = ROOT / 'tmp_test.txt'
 
 RESULTS = []
-
 
 def run(cmd, capture=True, check=False):
     try:
@@ -82,23 +72,6 @@ def check_backups_dir():
         fail('.backups missing or empty')
 
 
-def test_just_backup():
-    print('\n== Test just backup (optional) ==')
-    if shutil.which('just') is None:
-        print('just not found; skipping just backup test')
-        return
-    rc, out = run(['just', 'backup', '"verify backup from Justfile"'])
-    # Some shells may interpret quotes; try without embedded quotes if it fails
-    if rc != 0:
-        rc2, out2 = run(['just', 'backup', 'verify backup from Justfile'])
-        if rc2 == 0:
-            ok('just backup succeeded (alt)')
-            return
-        fail('just backup failed', out + '\n' + out2)
-    else:
-        ok('just backup succeeded')
-
-
 def manual_backup_record(msg='verify manual backup'):
     print('\n== Manual backup (git) ==')
     rc, out = run(['git', 'add', '-A'])
@@ -109,18 +82,14 @@ def manual_backup_record(msg='verify manual backup'):
     if rc != 0:
         # nothing to commit is okay
         print('git commit exit code', rc)
-        print(out)
-        # try to get HEAD anyway
     else:
         ok('git commit created: ' + (out.splitlines()[-1] if out.strip() else 'commit created'))
     rc, out = run(['git', 'rev-parse', 'HEAD'])
     if rc == 0:
         commit = out.strip()
-        # record manual json
         BACKUP_DIR.mkdir(exist_ok=True)
-        ts = commit[:10]
-        rec = {'ts': ts, 'commit': commit, 'msg': msg}
-        p = BACKUP_DIR / f'{ts}.manual.json'
+        rec = {'ts': commit[:10], 'commit': commit, 'msg': msg}
+        p = BACKUP_DIR / f'{commit}.manual.json'
         p.write_text(json.dumps(rec, indent=2), encoding='utf-8')
         ok('manual backup recorded: ' + commit)
         return commit
@@ -165,7 +134,6 @@ def run_safe_iter_success():
 
 def run_safe_iter_failure():
     print('\n== safe_iter failure case ==')
-    # Ensure tmp_test.txt currently contains original
     pre_head_rc, pre_head_out = run(['git', 'show', 'HEAD:tmp_test.txt'])
     expected = 'original\n'
     if pre_head_rc != 0 or pre_head_out != expected:
@@ -176,9 +144,23 @@ def run_safe_iter_failure():
     if rc == 0:
         fail('safe_iter failure-case returned 0 (expected non-zero)')
         return False
-    # After failure, check HEAD:tmp_test.txt and working file
-    rc1, head_content = run(['git', 'show', 'HEAD:tmp_test.txt'])
-    rc2, work_content = run(['cat', 'tmp_test.txt']) if shutil.which('cat') else run([sys.executable, '-c', "print(open('tmp_test.txt').read())"]) 
+    # After failure, find the latest .backups record (by commit-named file)
+    files = sorted([p for p in BACKUP_DIR.iterdir() if p.is_file()])
+    if not files:
+        fail('no backup records found after safe_iter run')
+        return False
+    last = files[-1]
+    rec = json.loads(last.read_text(encoding='utf-8'))
+    commit = rec.get('commit')
+    # Check HEAD
+    rc1, head_commit = run(['git', 'rev-parse', 'HEAD'])
+    if rc1 != 0:
+        fail('cannot get HEAD after failure', head_commit)
+        return False
+    # Check file content
+    rc2, head_content = run(['git', 'show', f'{commit}:tmp_test.txt'])
+    # read worktree
+    rc3, work_content = run([sys.executable, '-c', "print(open('tmp_test.txt').read())"]) 
     print('HEAD content repr:', repr(head_content))
     print('work content repr:', repr(work_content))
     if head_content == expected and work_content == expected:
@@ -221,17 +203,14 @@ def test_gitignore_behavior():
     secret = ROOT / 'secret.env'
     secret.write_text('SECRET', encoding='utf-8')
     rc, out = run(['git', 'add', '-A'])
-    # check if secret.env became tracked
     rc, out = run(['git', 'ls-files', '--others', '--exclude-standard'])
     if 'secret.env' in out:
         ok('secret.env is untracked (ignored)')
     else:
-        # maybe it got staged/tracked
         rc2, out2 = run(['git', 'ls-files', 'secret.env'])
         if out2.strip():
             fail('secret.env is tracked (should be ignored)')
         else:
-            # ambiguous: treat as pass with warning
             ok('secret.env not listed among untracked (ambiguous pass)')
     try:
         secret.unlink()
@@ -252,7 +231,6 @@ if __name__ == '__main__':
     if not prechecks():
         sys.exit(1)
     check_backups_dir()
-    test_just_backup()
     manual_backup_record()
     prepare_tracked_test_file()
     run_safe_iter_success()

@@ -1,0 +1,73 @@
+Verify backup/rollback run at 2026-03-11 11:11 (Asia/Shanghai)
+
+Command: python scripts/verify_backup_rollback.py
+
+== Prechecks ==
+[OK]  git available: git version 2.53.0.windows.1
+git status (porcelain): '?? scripts/verify_backup_rollback.py'
+[OK]  branch: feature/agent-iter
+[OK]  HEAD: 661911de087e0620274230e07f952c35530a5128
+
+== Check .backups dir ==
+[FAIL] .backups missing or empty
+
+== Test just backup (optional) ==
+[FAIL] just backup failed
+error: Recipe `backup` could not be run because just could not find the shell: program not found
+
+error: Recipe `backup` could not be run because just could not find the shell: program not found
+
+
+== Manual backup (git) ==
+[OK]  git commit created:  create mode 100644 scripts/verify_backup_rollback.py
+[OK]  manual backup recorded: 57a77de03d957ae159b7c9de2a51404685920915
+
+== Prepare tracked test file ==
+[OK]  tmp_test.txt committed at 8467b11525b11f600b873cf55ee0c4c1b737c754
+
+== safe_iter success case ==
+error: Recipe `backup` could not be run because just could not find the shell: program not found
+[feature/agent-iter 23a4f31] Auto-backup before running: 'C:\Python314\python.exe' -c 'print('"'"'hello safe-run'"'"'); import sys; sys.exit(0)' [20260311-111110]
+ 1 file changed, 5 insertions(+)
+ create mode 100644 .backups/57a77de03d.manual.json
+hello safe-run
+Command completed successfully.
+
+[OK]  safe_iter success run returned 0
+
+== safe_iter failure case ==
+error: Recipe `backup` could not be run because just could not find the shell: program not found
+[feature/agent-iter 63d6221] Auto-backup before running: 'C:\Python314\python.exe' -c 'open('"'"'tmp_test.txt'"'"','"'"'w'"'"').write('"'"'CORRUPTED\n'"'"'); import sys; sys.exit(1)' [20260311-111110]
+ 1 file changed, 5 insertions(+)
+ create mode 100644 .backups/20260311-111110.json
+[1;31m检测到致命异常，触发自动回滚！ 63d622177f10928f5411c46d30e36af68e18a0ac[0m
+HEAD is now at 63d6221 Auto-backup before running: 'C:\Python314\python.exe' -c 'open('"'"'tmp_test.txt'"'"','"'"'w'"'"').write('"'"'CORRUPTED\n'"'"'); import sys; sys.exit(1)' [20260311-111110]
+
+HEAD content repr: 'original\n'
+work content repr: 'original\n\n'
+[FAIL] rollback did not restore expected content
+HEAD='original\n' WORK='original\n\n'
+
+== Check backups record matches HEAD ==
+last backup commit: 57a77de03d957ae159b7c9de2a51404685920915
+current HEAD: 63d622177f10928f5411c46d30e36af68e18a0ac
+
+[FAIL] last backup commit does not match HEAD
+
+== Test .gitignore behavior ==
+[OK]  secret.env not listed among untracked (ambiguous pass)
+
+== Summary ==
+PASS git available: git version 2.53.0.windows.1
+PASS branch: feature/agent-iter
+PASS HEAD: 661911de087e0620274230e07f952c35530a5128
+FAIL .backups missing or empty
+FAIL just backup failed
+PASS git commit created:  create mode 100644 scripts/verify_backup_rollback.py
+PASS manual backup recorded: 57a77de03d957ae159b7c9de2a51404685920915
+PASS tmp_test.txt committed at 8467b11525b11f600b873cf55ee0c4c1b737c754
+PASS safe_iter success run returned 0
+FAIL rollback did not restore expected content
+FAIL last backup commit does not match HEAD
+PASS secret.env not listed among untracked (ambiguous pass)
+Passed 8/12 checks
